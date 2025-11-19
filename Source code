@@ -1,0 +1,105 @@
+Installing libraries needed
+
+!python.exe -m pip install --upgrade pip
+!pip install modernize
+!pip install dateparser
+!pip install num2words
+
+## DOWNLOADING RESOURSES
+
+
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+
+
+
+## importing all necessary libraries
+
+import dateparser
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from num2words import num2words
+import re
+
+## Converting time to words
+
+def convert_time_to_words(time_str):
+    time_obj = dateparser.parse(time_str)
+    hour = time_obj.hour
+    minute = time_obj.minute
+    am_pm = "AM" if hour < 12 else "PM"
+    hour_12 = hour % 12 if hour != 0 else 12
+    if minute == 0:
+        time_words = f"{num2words(hour_12)} o'clock {am_pm}"
+    else:
+        time_words = f"{num2words(hour_12)} {num2words(minute)} {am_pm}"
+    return time_words
+
+##   Converting date to words
+
+
+def convert_date_to_words(date_string):
+    try:
+        date_obj = dateparser.parse(date_string)
+        if date_obj:
+            return date_obj.strptime("%B") + " " + num2words(date_obj.day, ordinal=True) + " " + num2words(date_obj.year)
+    except Exception:
+        pass
+    return date_string
+
+##  Text Normalizing
+
+
+def normalize_text(text):
+    tokens = word_tokenize(text)  ## tokenizing words
+
+    normalized_tokens = []
+    for token in tokens:
+        try:
+            date_obj = dateparser.parse(token)
+            if date_obj:
+                if ":" in token:
+                    normalized_tokens.append(convert_time_to_words(token))
+                else:
+                    normalized_tokens.append(convert_date_to_words(token))
+                continue
+        except Exception as e:
+            pass
+        date_formats = ["%Y/%m/%d", "%Y\\%m\\%d", "%Y-%m-%d"]
+        for date_format in date_formats:
+            try:
+                date_obj = dateparser.parse(token, date_formats=[date_format])
+                if date_obj:
+                    normalized_tokens.append(convert_date_to_words(token))
+                    break
+            except Exception as e:
+                pass
+        else:
+            if token.isdigit() and 0 <= int(token) <=1000:
+                normalized_tokens.append(num2words(int(token)))
+            else:
+                if token.isalpha():  ## removing puctuation and special characters
+                    token = token.lower()  # converting to lower case
+                    lemmatizer = WordNetLemmatizer()
+                    token = lemmatizer.lemmatize(token)
+                    normalized_tokens.append(token)
+                else:
+                    cleaned_token = re.sub(r'[^\w\s]', '', token)
+                    if cleaned_token:
+                        cleaned_token = cleaned_token.lower()
+                        lemmatizer = WordNetLemmatizer()
+                        cleaned_token = lemmatizer.lemmatize(cleaned_token)
+                        normalized_tokens.append(cleaned_token)
+                    else:
+                        normalized_tokens.append(token)
+                   
+    return ' '.join(normalized_tokens)
+        
+## Example to test the model
+
+text = "This is an example sentence with 123 numbers on 01/01/1996 at 14:30!"
+print(normalize_text(text))
+
