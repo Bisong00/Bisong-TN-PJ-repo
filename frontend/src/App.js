@@ -68,7 +68,7 @@ const DuplicateModal = ({ record, onClose }) => {
          data-testid="duplicate-alert-modal" onClick={onClose}>
       <div className="w-full max-w-2xl bg-black border border-red-500 border-t-4 relative"
            onClick={(e) => e.stopPropagation()}>
-        <div className="scanline absolute inset-0" />
+        <div className="scanline absolute inset-0 pointer-events-none" />
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
           <div className="flex items-center gap-3">
             <AlertTriangle size={18} className="text-red-500" strokeWidth={1.5} />
@@ -610,7 +610,7 @@ function App() {
             </p>
           </div>
           <div className="border border-zinc-800 bg-black p-5 relative">
-            <div className="scanline absolute inset-0" />
+            <div className="scanline absolute inset-0 pointer-events-none" />
             <div className="text-[10px] font-mono tracking-[0.3em] text-zinc-500 uppercase mb-3">Status Feed</div>
             <div className="space-y-2 font-mono text-[11px]">
               <div className="text-emerald-400">&gt; hash_engine :: idle</div>
