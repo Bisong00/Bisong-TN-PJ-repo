@@ -90,14 +90,15 @@ def iter_files(root: Path, include_hidden: bool, max_size_bytes: int):
             yield p, st.st_size
 
 
-def send_batch(backend: str, items: list, root_label: str, dry_run: bool) -> dict:
+def send_batch(backend: str, items: list, root_label: str, dry_run: bool, token: str = "") -> dict:
     if dry_run:
         return {"scanned": len(items), "added": 0, "duplicates": 0,
                 "bytes_saved": 0, "duplicate_details": []}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     resp = requests.post(
         f"{backend.rstrip('/')}/api/files/scan",
         json={"items": items, "root_label": root_label, "source": "agent"},
-        timeout=120,
+        headers=headers, timeout=120,
     )
     resp.raise_for_status()
     return resp.json()
@@ -112,7 +113,7 @@ def human_bytes(n: float) -> str:
 
 
 def hash_and_batch(root: Path, include_hidden: bool, max_bytes: int,
-                   backend: str, dry_run: bool, on_progress=None):
+                   backend: str, dry_run: bool, on_progress=None, token: str = ""):
     """Yield (batch_result_dict) after each successful batch flush.
     Returns totals dict at the end via StopIteration.value (Python 3)."""
     batch: list = []
@@ -129,7 +130,7 @@ def hash_and_batch(root: Path, include_hidden: bool, max_bytes: int,
         if not batch:
             return None
         try:
-            r = send_batch(backend, batch, root_label, dry_run)
+            r = send_batch(backend, batch, root_label, dry_run, token=token)
             total_added += r.get("added", 0)
             total_dups += r.get("duplicates", 0)
             total_saved += r.get("bytes_saved", 0)
@@ -239,7 +240,8 @@ def cmd_scan(args):
         print(f"    scanned {n} files · {human_bytes(b)} · last: {p}")
 
     totals = hash_and_batch(root, args.include_hidden, max_bytes,
-                            args.backend, args.dry_run, on_progress=prog)
+                            args.backend, args.dry_run, on_progress=prog,
+                            token=args.token)
 
     dur = time.time() - started
     print()
@@ -336,7 +338,7 @@ def cmd_watch(args):
             if new_batch:
                 print(f"    [+] {len(new_batch)} new/changed file(s)")
                 try:
-                    r = send_batch(args.backend, new_batch, str(root), args.dry_run)
+                    r = send_batch(args.backend, new_batch, str(root), args.dry_run, token=args.token)
                     print(f"        added={r.get('added',0)} duplicates={r.get('duplicates',0)} "
                           f"saved={human_bytes(r.get('bytes_saved',0))}")
                     for d in (r.get("duplicate_details") or []):
@@ -361,7 +363,11 @@ def main() -> int:
     ap.add_argument("--replace-duplicates", action="store_true",
                     help="After scan, replace duplicates with symlinks to the canonical copy")
     ap.add_argument("--yes", action="store_true", help="Assume yes to all prompts (use with --replace-duplicates)")
+    ap.add_argument("--token", default="__AGENT_TOKEN__",
+                    help="Per-user agent token (required for authenticated uploads). Generate one in the Scan tab of the dashboard.")
     args = ap.parse_args()
+    if args.token == "__AGENT_TOKEN__":
+        args.token = ""
 
     if args.watch:
         return cmd_watch(args)

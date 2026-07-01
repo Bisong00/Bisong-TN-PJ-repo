@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import axios from "axios";
-import { Search, RefreshCw, Trash2, CheckCircle2, Link2 } from "lucide-react";
+import { Search, RefreshCw, Trash2, CheckCircle2, Link2, Download } from "lucide-react";
 import { API, fmtBytes } from "../lib/api";
 import { SectionHeader, Badge, StatCard } from "./shared";
+import { useToast } from "./Toast";
 
 export const DuplicatesPanel = ({ refreshAll }) => {
   const [items, setItems] = useState([]);
@@ -10,25 +11,36 @@ export const DuplicatesPanel = ({ refreshAll }) => {
   const [q, setQ] = useState("");
   const [reason, setReason] = useState("all");
   const [statusFilter, setStatusFilter] = useState("active");
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    const params = { q: q || undefined, reason: reason !== "all" ? reason : undefined };
+    const params = { q: q || undefined, reason: reason !== "all" ? reason : undefined, limit: 500 };
     if (statusFilter !== "all") params.reclaimed = statusFilter === "reclaimed";
     const [{ data }, { data: s }] = await Promise.all([
       axios.get(`${API}/duplicates`, { params }),
       axios.get(`${API}/duplicates/stats`),
     ]);
-    setItems(data);
+    setItems(data.items || []);
     setStats(s);
   }, [q, reason, statusFilter]);
 
   useEffect(() => { load(); }, [load]);
 
-  const markReclaimed = async (id) => { await axios.post(`${API}/duplicates/${id}/mark-reclaimed`); load(); refreshAll(); };
-  const dismiss = async (id) => { await axios.delete(`${API}/duplicates/${id}`); load(); refreshAll(); };
+  const markReclaimed = async (id) => {
+    await axios.post(`${API}/duplicates/${id}/mark-reclaimed`);
+    toast.ok("Marked reclaimed");
+    load(); refreshAll();
+  };
+  const dismiss = async (id) => {
+    await axios.delete(`${API}/duplicates/${id}`);
+    toast.info("Record dismissed");
+    load(); refreshAll();
+  };
   const scriptHref = (id, p) => `${API}/duplicates/${id}/script?platform=${p}`;
+  const reclaimAllHref = (p) => `${API}/duplicates/reclaim-all?platform=${p}`;
 
   const reasonChips = ["all", "vault_match", "batch_duplicate", "upload_duplicate"];
+  const hasActive = (stats?.active || 0) > 0;
 
   return (
     <div>
@@ -40,6 +52,29 @@ export const DuplicatesPanel = ({ refreshAll }) => {
         <StatCard testId="dup-stats-reclaimed" label="Reclaimed" value={stats?.reclaimed ?? 0} tone="accent" sub="Symlinked" />
         <StatCard testId="dup-stats-bytes" label="Reclaimable" value={fmtBytes(stats?.reclaimable_bytes || 0)} tone="accent" sub="Disk space" />
       </div>
+
+      {hasActive && (
+        <div className="border border-orange-500 bg-orange-500/5 p-5 mb-6 flex flex-col md:flex-row items-start md:items-center gap-4" data-testid="reclaim-all-bar">
+          <div className="flex-1">
+            <div className="font-mono text-[10px] tracking-[0.3em] uppercase text-orange-500 mb-1">
+              &gt; master_action · reclaim_everything
+            </div>
+            <div className="text-white text-sm">
+              Generate one script that turns every one of your <span className="text-orange-400 font-bold">{stats.active}</span> active duplicates into symlinks. Recover <span className="text-orange-400 font-bold">{fmtBytes(stats.reclaimable_bytes || 0)}</span> in one execution.
+            </div>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <a data-testid="reclaim-all-posix-btn" href={reclaimAllHref("posix")}
+              className="border-2 border-orange-500 bg-orange-500 hover:bg-orange-400 text-black font-mono text-xs uppercase tracking-[0.25em] px-4 py-2 flex items-center gap-2">
+              <Download size={13} strokeWidth={2} /> reclaim_all.sh
+            </a>
+            <a data-testid="reclaim-all-windows-btn" href={reclaimAllHref("windows")}
+              className="border-2 border-orange-500 hover:bg-orange-500 hover:text-black text-orange-400 font-mono text-xs uppercase tracking-[0.25em] px-4 py-2 flex items-center gap-2">
+              <Download size={13} strokeWidth={2} /> reclaim_all.ps1
+            </a>
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-col md:flex-row gap-3 mb-4">
         <div className="flex-1 flex items-center border-b-2 border-zinc-800 focus-within:border-orange-500">

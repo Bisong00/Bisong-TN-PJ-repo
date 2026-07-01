@@ -3,9 +3,9 @@ import { Search, Trash2, Download } from "lucide-react";
 import { API, CATEGORIES, catIcon, fmtBytes } from "../lib/api";
 import { SectionHeader, Badge } from "./shared";
 
-export const FilesPanel = ({ files, onDelete, query, setQuery, category, setCategory }) => (
+export const FilesPanel = ({ files, total, onDelete, query, setQuery, category, setCategory }) => (
   <div>
-    <SectionHeader index="02" title="File Registry" sub={`${files.length} tracked`} />
+    <SectionHeader index="02" title="File Registry" sub={`${files.length} shown${total != null && total !== files.length ? ` · ${total} total` : ""}`} />
 
     <div className="flex flex-col md:flex-row gap-3 mb-4">
       <div className="flex-1 flex items-center border-b-2 border-zinc-800 focus-within:border-orange-500">

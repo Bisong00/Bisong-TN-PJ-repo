@@ -1,8 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
-import { FolderSearch, Download, Copy, Radar, HardDrive, CheckCircle2 } from "lucide-react";
+import { FolderSearch, Download, Copy, Radar, HardDrive, CheckCircle2, Key, Plus, Trash2 } from "lucide-react";
 import { API, BACKEND_URL, fmtBytes } from "../lib/api";
 import { SectionHeader, Badge } from "./shared";
+import { useToast } from "./Toast";
 
 async function hashFileSHA256(file) {
   const buf = await file.arrayBuffer();
@@ -18,45 +19,76 @@ export const ScanPanel = ({ refreshAll }) => {
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
   const [platform, setPlatform] = useState("mac");
+  const [tokens, setTokens] = useState([]);
+  const [freshToken, setFreshToken] = useState("");
+  const toast = useToast();
+
+  const loadTokens = async () => {
+    try {
+      const { data } = await axios.get(`${API}/auth/agent-token`);
+      setTokens(data || []);
+    } catch (_) {}
+  };
+  useEffect(() => { loadTokens(); }, []);
+
+  const generateToken = async () => {
+    try {
+      const { data } = await axios.post(`${API}/auth/agent-token`);
+      setFreshToken(data.token);
+      toast.ok("Agent token generated");
+      loadTokens();
+    } catch (e) { toast.err("Token generation failed"); }
+  };
+
+  const revokeToken = async (t) => {
+    try {
+      await axios.delete(`${API}/auth/agent-token/${t}`);
+      toast.info("Token revoked");
+      if (freshToken === t) setFreshToken("");
+      loadTokens();
+    } catch (e) { toast.err("Revoke failed"); }
+  };
+
+  const tokenForCmd = freshToken || "<YOUR_AGENT_TOKEN>";
 
   const commands = {
     mac: `# Mac / Linux — scan your entire home folder
 curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
 pip3 install requests
 
-# One-shot scan
-python3 monoscan.py --root ~
+# One-shot scan (paste your agent token below)
+python3 monoscan.py --root ~ --token ${tokenForCmd}
 
-# Continuous watch mode (auto-dedup as new files arrive)
-python3 monoscan.py --root ~ --watch
+# Continuous watch mode
+python3 monoscan.py --root ~ --token ${tokenForCmd} --watch
 
 # Enforce one-instance-on-disk: replace duplicates with symlinks
-python3 monoscan.py --root ~ --replace-duplicates --yes`,
+python3 monoscan.py --root ~ --token ${tokenForCmd} --replace-duplicates --yes`,
     windows: `# Windows PowerShell — scan your entire C: drive
 Invoke-WebRequest -Uri "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}" -OutFile monoscan.py
 pip install requests
 
 # One-shot scan
-python monoscan.py --root C:\\
+python monoscan.py --root C:\\ --token ${tokenForCmd}
 
-# Continuous watch mode (auto-dedup as new files arrive)
-python monoscan.py --root C:\\Users\\$env:USERNAME --watch
+# Continuous watch mode
+python monoscan.py --root C:\\Users\\$env:USERNAME --token ${tokenForCmd} --watch
 
 # Enforce one-instance-on-disk: replace duplicates with symlinks
 # (Windows: enable Developer Mode or run PowerShell as admin for symlink perms)
-python monoscan.py --root C:\\Users\\$env:USERNAME --replace-duplicates --yes`,
+python monoscan.py --root C:\\Users\\$env:USERNAME --token ${tokenForCmd} --replace-duplicates --yes`,
     linux: `# Linux — scan the whole disk (sudo for system dirs)
 curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
 pip3 install requests
 
 # One-shot scan
-python3 monoscan.py --root /
+python3 monoscan.py --root / --token ${tokenForCmd}
 
-# Continuous watch mode (auto-dedup as new files arrive)
-python3 monoscan.py --root ~ --watch
+# Continuous watch mode
+python3 monoscan.py --root ~ --token ${tokenForCmd} --watch
 
 # Enforce one-instance-on-disk: replace duplicates with symlinks
-python3 monoscan.py --root ~ --replace-duplicates --yes`,
+python3 monoscan.py --root ~ --token ${tokenForCmd} --replace-duplicates --yes`,
   };
 
   const runBrowserScan = async (fileList) => {
@@ -112,6 +144,7 @@ python3 monoscan.py --root ~ --replace-duplicates --yes`,
     setProgress({ done: files.length, total: files.length, current: "complete" });
     setResult(finalResult);
     setScanning(false);
+    toast.ok(`Scan done · ${finalResult.added} added · ${finalResult.duplicates} duplicates`);
     refreshAll();
   };
 
@@ -220,6 +253,66 @@ python3 monoscan.py --root ~ --replace-duplicates --yes`,
                   </table>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="border border-zinc-800 bg-zinc-950 mb-8" data-testid="agent-token-panel">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+          <div className="flex items-center gap-2">
+            <Key size={14} className="text-orange-500" strokeWidth={1.5} />
+            <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-zinc-400">
+              &gt; agent_token · authenticate the cli
+            </span>
+          </div>
+          <span className="font-mono text-[10px] text-zinc-600 uppercase tracking-widest">
+            {tokens.length} active
+          </span>
+        </div>
+        <div className="p-5 space-y-3">
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            The MonoScan CLI needs a per-user token to write to <span className="text-orange-400">your</span> vault.
+            Generate one, paste it into the command block below (already interpolated), then run the agent on your machine.
+          </p>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button data-testid="agent-token-generate" onClick={generateToken}
+              className="border border-orange-500 bg-orange-500/10 hover:bg-orange-500 hover:text-black text-orange-400 font-mono text-xs uppercase tracking-[0.2em] px-3 py-2 flex items-center gap-2">
+              <Plus size={13} strokeWidth={1.5} /> Generate new token
+            </button>
+            <span className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+              7-day session bound · revocable · never expires unless revoked
+            </span>
+          </div>
+
+          {freshToken && (
+            <div className="border border-emerald-500 bg-emerald-500/5 p-3" data-testid="agent-token-display">
+              <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-emerald-400 mb-1">
+                [✓] new_token · shown once · treat like a password
+              </div>
+              <div className="font-mono text-[11px] text-white break-all">{freshToken}</div>
+            </div>
+          )}
+
+          {tokens.length > 0 && (
+            <div className="border border-zinc-800">
+              <div className="px-3 py-2 border-b border-zinc-800 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                Active tokens
+              </div>
+              {tokens.map((t) => (
+                <div key={t.token} className="flex items-center justify-between px-3 py-2 border-b border-zinc-900 last:border-b-0">
+                  <div className="font-mono text-[11px] text-zinc-400 truncate">
+                    {t.token.slice(0, 12)}…{t.token.slice(-6)}
+                    <span className="ml-3 text-zinc-600">created {new Date(t.created_at).toLocaleDateString()}</span>
+                  </div>
+                  <button data-testid={`agent-token-revoke-${t.token.slice(0, 8)}`}
+                    onClick={() => revokeToken(t.token)}
+                    className="text-zinc-500 hover:text-red-400 border border-transparent hover:border-red-500/40 p-1"
+                    title="Revoke token">
+                    <Trash2 size={13} strokeWidth={1.5} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
         </div>

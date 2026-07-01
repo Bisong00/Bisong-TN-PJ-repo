@@ -1,8 +1,12 @@
+import axios from "axios";
 import React from "react";
 import { FileText, FileAudio, FileVideo, Image as ImageIcon, Package, File as FileIcon } from "lucide-react";
 
 export const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
+
+// Global axios: send cookies with every request (needed for session_token)
+axios.defaults.withCredentials = true;
 
 export const fmtBytes = (b) => {
   if (b === 0 || b == null) return "0 B";
