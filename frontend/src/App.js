@@ -262,6 +262,16 @@ const FilesPanel = ({ files, onDelete, query, setQuery, category, setCategory })
             placeholder="search :: filename / hash / path / mime"
             className="bg-transparent w-full py-2 font-mono text-sm text-white placeholder:text-zinc-600" />
         </div>
+        <div className="flex gap-2">
+          <a data-testid="export-files-csv" href={`${API}/files/export?format=csv`}
+             className="border border-zinc-700 hover:border-orange-500 hover:text-orange-400 text-zinc-300 font-mono text-[10px] uppercase tracking-[0.2em] px-3 py-2 flex items-center gap-1">
+            <Download size={12} strokeWidth={1.5} /> CSV
+          </a>
+          <a data-testid="export-files-json" href={`${API}/files/export?format=json`}
+             className="border border-zinc-700 hover:border-orange-500 hover:text-orange-400 text-zinc-300 font-mono text-[10px] uppercase tracking-[0.2em] px-3 py-2 flex items-center gap-1">
+            <Download size={12} strokeWidth={1.5} /> JSON
+          </a>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 mb-6">
@@ -404,6 +414,16 @@ const AppsPanel = ({ apps, refresh, onDup }) => {
             placeholder="search apps"
             className="bg-transparent w-full py-2 font-mono text-sm text-white placeholder:text-zinc-600" />
         </div>
+        <div className="flex gap-2">
+          <a data-testid="export-apps-csv" href={`${API}/apps/export?format=csv`}
+             className="border border-zinc-700 hover:border-orange-500 hover:text-orange-400 text-zinc-300 font-mono text-[10px] uppercase tracking-[0.2em] px-3 py-2 flex items-center gap-1">
+            <Download size={12} strokeWidth={1.5} /> CSV
+          </a>
+          <a data-testid="export-apps-json" href={`${API}/apps/export?format=json`}
+             className="border border-zinc-700 hover:border-orange-500 hover:text-orange-400 text-zinc-300 font-mono text-[10px] uppercase tracking-[0.2em] px-3 py-2 flex items-center gap-1">
+            <Download size={12} strokeWidth={1.5} /> JSON
+          </a>
+        </div>
         <div className="flex flex-wrap gap-2">
           {["all", ...PLATFORMS].map((p) => (
             <button key={p}
@@ -491,15 +511,40 @@ const ScanPanel = ({ refreshAll }) => {
     mac: `# Mac / Linux — scan your entire home folder
 curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
 pip3 install requests
-python3 monoscan.py --root ~`,
+
+# One-shot scan
+python3 monoscan.py --root ~
+
+# Continuous watch mode (auto-dedup as new files arrive)
+python3 monoscan.py --root ~ --watch
+
+# Enforce one-instance-on-disk: replace duplicates with symlinks
+python3 monoscan.py --root ~ --replace-duplicates --yes`,
     windows: `# Windows PowerShell — scan your entire C: drive
 Invoke-WebRequest -Uri "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}" -OutFile monoscan.py
 pip install requests
-python monoscan.py --root C:\\`,
-    linux: `# Linux — scan the whole disk (may need sudo for system dirs)
+
+# One-shot scan
+python monoscan.py --root C:\\
+
+# Continuous watch mode (auto-dedup as new files arrive)
+python monoscan.py --root C:\\Users\\$env:USERNAME --watch
+
+# Enforce one-instance-on-disk: replace duplicates with symlinks
+# (Windows: enable Developer Mode or run PowerShell as admin for symlink perms)
+python monoscan.py --root C:\\Users\\$env:USERNAME --replace-duplicates --yes`,
+    linux: `# Linux — scan the whole disk (sudo for system dirs)
 curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
 pip3 install requests
-python3 monoscan.py --root /`,
+
+# One-shot scan
+python3 monoscan.py --root /
+
+# Continuous watch mode (auto-dedup as new files arrive)
+python3 monoscan.py --root ~ --watch
+
+# Enforce one-instance-on-disk: replace duplicates with symlinks
+python3 monoscan.py --root ~ --replace-duplicates --yes`,
   };
 
   const runBrowserScan = async (fileList) => {
@@ -741,7 +786,9 @@ python3 monoscan.py --root /`,
           <div className="border-t border-zinc-800 pt-3 space-y-1 text-[11px] font-mono text-zinc-500">
             <div>[i] Only SHA-256 hashes + filenames are sent — file contents never leave your machine.</div>
             <div>[i] Skips hidden folders, node_modules, .git, System Volume Information, $RECYCLE.BIN by default.</div>
-            <div>[i] Schedule with cron (Mac/Linux) or Task Scheduler (Windows) for continuous dedup enforcement.</div>
+            <div>[i] <span className="text-orange-400">--watch</span> keeps running and hashes new files as they arrive (auto-dedup on downloads).</div>
+            <div>[i] <span className="text-orange-400">--replace-duplicates</span> deletes duplicates and replaces them with symlinks to the canonical copy — real OS-level enforcement.</div>
+            <div>[i] Schedule with cron / launchd (Mac/Linux) or Task Scheduler (Windows) for continuous dedup.</div>
           </div>
         </div>
       </div>

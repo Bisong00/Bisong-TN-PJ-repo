@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 3 verified: (1) bulk_scan now correctly labels within-batch duplicates as 'batch_duplicate' (before, per iter_2, it was 'vault_match'); (2) insert_many bulk path works for 25 unique items with no false duplicate counts; (3) mixed new+vault batch labels vault matches as 'vault_match'; (4) /api/files/export csv/json + /api/apps/export csv/json return correct content-type, Content-Disposition attachment, expected header lines, and correctly RFC-4180 escape commas & quotes (round-trip via csv.DictReader validated a filename containing both ',' and '\"'); (5) served monoscan.py contains new --watch/--replace-duplicates/--yes/--interval flags plus cmd_watch and do_replace_duplicates functions and correctly substitutes __BACKEND_URL__. Frontend: Files tab exposes export-files-csv/json, Apps tab exposes export-apps-csv/json (all with correct hrefs to REACT_APP_BACKEND_URL/api/{files|apps}/export?format=..), Scan tab agent-command for mac/windows/linux each contains '--watch' and '--replace-duplicates'. Regressions (upload dedup, apps CRUD + case-insensitive dedup, stats, filter chips) all pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Files tab", "issues": ["Registry has stale TEST_beta.pdf rows left from previous iterations' test runs; cosmetic only. Consider a one-time seed cleanup or ensure previous tests didn't leak."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_scan_and_agent.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Clean up leftover TEST_beta.pdf / TEST_alpha.txt rows in the files collection from earlier iterations.",
+    "(Optional, from iter_2, still open) Split App.js (~1040 lines) into per-panel modules (FilesPanel, AppsPanel, ScanPanel, Dropzone) for maintainability.",
+    "(Optional, security) Tighten CORS: allow_credentials=True with default CORS_ORIGINS='*' is a spec violation for browsers; scope to preview/prod origin in .env."
+  ],
+  "critical_code_review_comments": [
+    "server.py bulk_scan: fix from iter_2 verified — batch_duplicate check is now BEFORE vault lookup and vault is prefetched via a single $in query. Insert_many with ordered=False is used. Good.",
+    "server.py _csv_line: correctly quotes fields containing ',', '\"', '\\n', '\\r' and doubles internal quotes. Verified round-trip parse.",
+    "server.py export_files/export_apps: to_list(100000) cap is fine for MVP but should paginate for very large vaults; consider streaming response for csv.",
+    "server.py uses __import__('json') inline for the export JSON path — trivial style nit; a top-level `import json` would be cleaner.",
+    "monoscan.py cmd_watch: baseline-then-poll approach is deps-free and correct, but relies on set-of-paths (str(p)) which does not detect content mutations of already-known paths. Acceptable for MVP dedup use-case."
+  ],
+  "updated_files": ["/app/backend/tests/test_scan_and_agent.py"],
+  "success_rate": {"backend": "100% (13/13)", "frontend": "100% (all UI checks passed)"},
+  "seed_data_creation": "All test data prefixed with TEST_ and cleaned up per-test; some leftover TEST_beta.pdf/TEST_alpha.txt rows from prior iterations were observed in the vault (cosmetic).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 3 delivered on all iter_2 action items. Backend test file at /app/backend/tests/test_scan_and_agent.py now covers: batch_duplicate label correctness, bulk insert_many path, new+vault_match mix, CSV export (with quote/comma escape roundtrip), JSON export, apps CSV/JSON export, agent-script contains --watch/--replace-duplicates/--yes/--interval/cmd_watch/do_replace_duplicates, __BACKEND_URL__ substitution, plus regressions (upload dedup, apps CRUD, stats). Frontend Playwright verified export buttons hrefs on Files & Apps tabs and that the agent-command block for mac/windows/linux contains --watch and --replace-duplicates. No blocking issues. NOTE: symlink-replace behavior of monoscan.py agent was intentionally NOT executed (touches local FS) — flag presence in served script is verified instead.",
+  "rca_of_the_issue": "N/A — iteration under review passed all functional and integration checks."
+}

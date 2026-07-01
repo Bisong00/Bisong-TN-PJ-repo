@@ -202,74 +202,100 @@ async def register_file(record: FileRecord):
 
 @api_router.post("/files/scan")
 async def bulk_scan(payload: ScanRequest):
-    """Bulk-ingest a batch of hashed items from a folder scan (browser folder-picker
-    or local monoscan.py agent). Enforces one-instance-per-hash across the whole vault
-    AND within the batch itself. Returns per-item results and aggregate stats."""
+    """Bulk-ingest a batch of hashed items. Optimized:
+       - Prefetch all matching SHAs from vault in ONE query
+       - Detect within-batch duplicates BEFORE the vault check (correct labeling)
+       - Persist unique items via a single insert_many
+    """
+    items = payload.items
+    if not items:
+        return {"scanned": 0, "added": 0, "duplicates": 0, "bytes_saved": 0,
+                "total_bytes_scanned": 0, "root_label": payload.root_label,
+                "source": payload.source, "duplicate_details": []}
+
+    # normalize + collect all hashes
+    shas = [it.sha256.lower() for it in items]
+
+    # bulk vault lookup
+    vault_rows = await db.files.find(
+        {"sha256": {"$in": list(set(shas))}}, {"_id": 0}
+    ).to_list(length=len(shas))
+    vault_map = {r["sha256"]: r for r in vault_rows}
+
     added = 0
     duplicates = 0
     bytes_saved = 0
     total_bytes = 0
     duplicate_details: List[dict] = []
     seen_in_batch: dict = {}
+    to_insert: List[dict] = []
 
-    for item in payload.items:
-        total_bytes += int(item.size or 0)
-        sha = item.sha256.lower()
+    for it in items:
+        size = int(it.size or 0)
+        total_bytes += size
+        sha = it.sha256.lower()
 
-        # 1) Already in vault?
-        existing = await db.files.find_one({"sha256": sha}, {"_id": 0})
-        if existing:
-            duplicates += 1
-            bytes_saved += int(item.size or 0)
-            duplicate_details.append({
-                "scanned_path": item.relative_path,
-                "existing_path": existing.get("original_path") or existing.get("filename"),
-                "filename": item.filename,
-                "size": item.size,
-                "sha256": sha,
-                "reason": "vault_match",
-            })
-            await inc_counter(item.size or 0)
-            continue
-
-        # 2) Duplicate within this batch?
+        # 1) Duplicate within this batch (checked first for correct labeling)
         if sha in seen_in_batch:
             duplicates += 1
-            bytes_saved += int(item.size or 0)
+            bytes_saved += size
             duplicate_details.append({
-                "scanned_path": item.relative_path,
+                "scanned_path": it.relative_path,
                 "existing_path": seen_in_batch[sha],
-                "filename": item.filename,
-                "size": item.size,
+                "filename": it.filename,
+                "size": size,
                 "sha256": sha,
                 "reason": "batch_duplicate",
             })
-            await inc_counter(item.size or 0)
             continue
 
-        # 3) Unique — persist it
-        seen_in_batch[sha] = item.relative_path
+        # 2) Already in vault?
+        existing = vault_map.get(sha)
+        if existing:
+            duplicates += 1
+            bytes_saved += size
+            duplicate_details.append({
+                "scanned_path": it.relative_path,
+                "existing_path": existing.get("original_path") or existing.get("filename"),
+                "filename": it.filename,
+                "size": size,
+                "sha256": sha,
+                "reason": "vault_match",
+            })
+            continue
+
+        # 3) Unique — queue for insert and remember for within-batch check
+        seen_in_batch[sha] = it.relative_path
         record = FileRecord(
-            filename=item.filename,
-            size=int(item.size or 0),
-            mime_type=item.mime_type or "application/octet-stream",
+            filename=it.filename,
+            size=size,
+            mime_type=it.mime_type or "application/octet-stream",
             sha256=sha,
-            file_category=classify_file(item.filename, item.mime_type or ""),
-            original_path=item.relative_path,
+            file_category=classify_file(it.filename, it.mime_type or ""),
+            original_path=it.relative_path,
         )
-        doc = record.model_dump()
-        await db.files.insert_one(doc)
+        to_insert.append(record.model_dump())
         added += 1
 
+    if to_insert:
+        await db.files.insert_many(to_insert, ordered=False)
+
+    if duplicates:
+        await db.dedup_counter.update_one(
+            {"_id": "global"},
+            {"$inc": {"duplicates_prevented": duplicates, "bytes_saved": int(bytes_saved)}},
+            upsert=True,
+        )
+
     return {
-        "scanned": len(payload.items),
+        "scanned": len(items),
         "added": added,
         "duplicates": duplicates,
         "bytes_saved": bytes_saved,
         "total_bytes_scanned": total_bytes,
         "root_label": payload.root_label,
         "source": payload.source,
-        "duplicate_details": duplicate_details[:500],  # cap payload
+        "duplicate_details": duplicate_details[:500],
     }
 
 
@@ -295,6 +321,55 @@ async def delete_file(file_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="File not found")
     return {"deleted": True}
+
+
+def _csv_line(vals: List[str]) -> str:
+    out = []
+    for v in vals:
+        s = "" if v is None else str(v)
+        if any(c in s for c in [",", "\"", "\n", "\r"]):
+            s = "\"" + s.replace("\"", "\"\"") + "\""
+        out.append(s)
+    return ",".join(out) + "\n"
+
+
+@api_router.get("/files/export")
+async def export_files(format: str = "json"):
+    rows = await db.files.find({}, {"_id": 0}).sort("created_at", -1).to_list(100000)
+    if format.lower() == "csv":
+        headers = ["id", "filename", "size", "mime_type", "sha256",
+                   "file_category", "original_path", "created_at"]
+        body = _csv_line(headers)
+        for r in rows:
+            body += _csv_line([r.get(h, "") for h in headers])
+        return PlainTextResponse(
+            body, media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=mononode_files.csv"},
+        )
+    return PlainTextResponse(
+        __import__("json").dumps(rows, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=mononode_files.json"},
+    )
+
+
+@api_router.get("/apps/export")
+async def export_apps(format: str = "json"):
+    rows = await db.apps.find({}, {"_id": 0}).sort("created_at", -1).to_list(100000)
+    if format.lower() == "csv":
+        headers = ["id", "app_name", "version", "platform", "install_path", "notes", "created_at"]
+        body = _csv_line(headers)
+        for r in rows:
+            body += _csv_line([r.get(h, "") for h in headers])
+        return PlainTextResponse(
+            body, media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=mononode_apps.csv"},
+        )
+    return PlainTextResponse(
+        __import__("json").dumps(rows, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=mononode_apps.json"},
+    )
 
 
 # ---------- Apps endpoints ----------
