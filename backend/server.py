@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -34,6 +35,20 @@ class FileRecord(BaseModel):
     file_category: str  # pdf, doc, audio, video, image, installer, other
     original_path: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ScanItem(BaseModel):
+    filename: str
+    size: int
+    sha256: str
+    relative_path: str  # absolute or relative path where the file lives on user's disk
+    mime_type: Optional[str] = ""
+
+
+class ScanRequest(BaseModel):
+    items: List[ScanItem]
+    root_label: Optional[str] = ""  # e.g. "C:\\" or "/Users/alice"
+    source: Optional[str] = "browser"  # "browser" or "agent"
 
 
 class AppRegistryEntry(BaseModel):
@@ -185,6 +200,79 @@ async def register_file(record: FileRecord):
     return {"duplicate": False, "record": doc}
 
 
+@api_router.post("/files/scan")
+async def bulk_scan(payload: ScanRequest):
+    """Bulk-ingest a batch of hashed items from a folder scan (browser folder-picker
+    or local monoscan.py agent). Enforces one-instance-per-hash across the whole vault
+    AND within the batch itself. Returns per-item results and aggregate stats."""
+    added = 0
+    duplicates = 0
+    bytes_saved = 0
+    total_bytes = 0
+    duplicate_details: List[dict] = []
+    seen_in_batch: dict = {}
+
+    for item in payload.items:
+        total_bytes += int(item.size or 0)
+        sha = item.sha256.lower()
+
+        # 1) Already in vault?
+        existing = await db.files.find_one({"sha256": sha}, {"_id": 0})
+        if existing:
+            duplicates += 1
+            bytes_saved += int(item.size or 0)
+            duplicate_details.append({
+                "scanned_path": item.relative_path,
+                "existing_path": existing.get("original_path") or existing.get("filename"),
+                "filename": item.filename,
+                "size": item.size,
+                "sha256": sha,
+                "reason": "vault_match",
+            })
+            await inc_counter(item.size or 0)
+            continue
+
+        # 2) Duplicate within this batch?
+        if sha in seen_in_batch:
+            duplicates += 1
+            bytes_saved += int(item.size or 0)
+            duplicate_details.append({
+                "scanned_path": item.relative_path,
+                "existing_path": seen_in_batch[sha],
+                "filename": item.filename,
+                "size": item.size,
+                "sha256": sha,
+                "reason": "batch_duplicate",
+            })
+            await inc_counter(item.size or 0)
+            continue
+
+        # 3) Unique — persist it
+        seen_in_batch[sha] = item.relative_path
+        record = FileRecord(
+            filename=item.filename,
+            size=int(item.size or 0),
+            mime_type=item.mime_type or "application/octet-stream",
+            sha256=sha,
+            file_category=classify_file(item.filename, item.mime_type or ""),
+            original_path=item.relative_path,
+        )
+        doc = record.model_dump()
+        await db.files.insert_one(doc)
+        added += 1
+
+    return {
+        "scanned": len(payload.items),
+        "added": added,
+        "duplicates": duplicates,
+        "bytes_saved": bytes_saved,
+        "total_bytes_scanned": total_bytes,
+        "root_label": payload.root_label,
+        "source": payload.source,
+        "duplicate_details": duplicate_details[:500],  # cap payload
+    }
+
+
 @api_router.get("/files")
 async def list_files(q: Optional[str] = None, category: Optional[str] = None):
     query: dict = {}
@@ -286,6 +374,21 @@ async def stats():
 @api_router.get("/")
 async def root():
     return {"service": "MonoNode Dedup API", "status": "online"}
+
+
+@api_router.get("/agent/monoscan.py", response_class=PlainTextResponse)
+async def agent_script(request_backend: Optional[str] = None):
+    """Serve the local scanner agent (Python) with the correct backend URL baked in."""
+    script_path = ROOT_DIR / "agent" / "monoscan.py"
+    body = script_path.read_text(encoding="utf-8")
+    backend_url = request_backend or os.environ.get("PUBLIC_BACKEND_URL", "")
+    if backend_url:
+        body = body.replace("__BACKEND_URL__", backend_url)
+    return PlainTextResponse(
+        body,
+        headers={"Content-Disposition": "attachment; filename=monoscan.py"},
+        media_type="text/x-python",
+    )
 
 
 app.include_router(api_router)

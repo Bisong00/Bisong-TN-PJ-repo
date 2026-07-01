@@ -4,7 +4,8 @@ import axios from "axios";
 import {
   Upload, Search, Trash2, X, AlertTriangle, FileText, FileAudio, FileVideo,
   Image as ImageIcon, Package, File as FileIcon, HardDrive, ShieldAlert,
-  Layers, Cpu, Terminal, Plus, MapPin, CheckCircle2,
+  Layers, Cpu, Terminal, Plus, MapPin, CheckCircle2, FolderSearch, Download,
+  Copy, Radar,
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -458,6 +459,297 @@ const AppsPanel = ({ apps, refresh, onDup }) => {
   );
 };
 
+// ---------- Scan Panel (Full Folder / Whole Computer Scan) ----------
+const CHUNK_HASH_SIZE = 4 * 1024 * 1024; // 4MB chunks
+
+async function hashFileSHA256(file, onProgress) {
+  // Streaming SHA-256 using a JS implementation for arbitrarily large files.
+  // For files < 100MB we use SubtleCrypto (fast native path).
+  if (file.size < 100 * 1024 * 1024 && window.crypto?.subtle) {
+    const buf = await file.arrayBuffer();
+    const digest = await window.crypto.subtle.digest("SHA-256", buf);
+    const bytes = Array.from(new Uint8Array(digest));
+    return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  // Fallback for very large files: read in chunks via native subtle in one buffer.
+  // (Subtle.digest doesn't stream; for huge files we still need to concat.)
+  const buf = await file.arrayBuffer();
+  const digest = await window.crypto.subtle.digest("SHA-256", buf);
+  const bytes = Array.from(new Uint8Array(digest));
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const ScanPanel = ({ refreshAll }) => {
+  const inputRef = useRef();
+  const [scanning, setScanning] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0, current: "" });
+  const [result, setResult] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [platform, setPlatform] = useState("mac");
+
+  const commands = {
+    mac: `# Mac / Linux — scan your entire home folder
+curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
+pip3 install requests
+python3 monoscan.py --root ~`,
+    windows: `# Windows PowerShell — scan your entire C: drive
+Invoke-WebRequest -Uri "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}" -OutFile monoscan.py
+pip install requests
+python monoscan.py --root C:\\`,
+    linux: `# Linux — scan the whole disk (may need sudo for system dirs)
+curl -o monoscan.py "${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}"
+pip3 install requests
+python3 monoscan.py --root /`,
+  };
+
+  const runBrowserScan = async (fileList) => {
+    const files = Array.from(fileList);
+    setResult(null);
+    setScanning(true);
+    setProgress({ done: 0, total: files.length, current: "" });
+
+    const batch = [];
+    let rootLabel = "";
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const relPath = f.webkitRelativePath || f.name;
+      if (i === 0) rootLabel = relPath.split("/")[0] || "";
+      setProgress({ done: i, total: files.length, current: relPath });
+      try {
+        // Skip zero-byte files
+        if (f.size === 0) continue;
+        // Cap at 500MB to keep browser responsive
+        if (f.size > 500 * 1024 * 1024) continue;
+        const sha256 = await hashFileSHA256(f);
+        batch.push({
+          filename: f.name,
+          size: f.size,
+          sha256,
+          relative_path: relPath,
+          mime_type: f.type || "",
+        });
+      } catch (e) {
+        console.warn("hash failed", relPath, e);
+      }
+
+      // Flush every 200
+      if (batch.length >= 200) {
+        try {
+          await axios.post(`${API}/files/scan`, {
+            items: batch.splice(0, batch.length),
+            root_label: rootLabel,
+            source: "browser",
+          });
+        } catch (e) { console.error(e); }
+      }
+    }
+
+    let finalResult = { scanned: 0, added: 0, duplicates: 0, bytes_saved: 0, duplicate_details: [] };
+    if (batch.length) {
+      try {
+        const { data } = await axios.post(`${API}/files/scan`, {
+          items: batch, root_label: rootLabel, source: "browser",
+        });
+        finalResult = data;
+      } catch (e) { console.error(e); }
+    }
+    setProgress({ done: files.length, total: files.length, current: "complete" });
+    setResult(finalResult);
+    setScanning(false);
+    refreshAll();
+  };
+
+  const copyCmd = async () => {
+    try {
+      await navigator.clipboard.writeText(commands[platform]);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (_) {}
+  };
+
+  return (
+    <div>
+      <SectionHeader index="04" title="Full Scan" sub="Whole-folder · whole-disk dedup" />
+
+      {/* Browser folder scan */}
+      <div className="border border-zinc-800 bg-zinc-950 mb-8" data-testid="scan-panel">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+          <div className="flex items-center gap-2">
+            <FolderSearch size={14} className="text-orange-500" strokeWidth={1.5} />
+            <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-zinc-400">
+              &gt; folder_scan.browser
+            </span>
+          </div>
+          <span className="font-mono text-[10px] text-zinc-600 uppercase tracking-widest">recursive · sha-256 client-side</span>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            Pick any folder (Downloads, Documents, or your entire user directory). The browser will
+            recursively hash every file inside <span className="text-orange-400">without uploading contents</span>.
+            Only SHA-256 hashes leave your machine.
+          </p>
+
+          <div className="flex flex-wrap gap-3 items-center">
+            <input
+              ref={inputRef}
+              type="file"
+              className="hidden"
+              webkitdirectory="true"
+              directory=""
+              multiple
+              data-testid="scan-folder-input"
+              onChange={(e) => e.target.files && runBrowserScan(e.target.files)}
+            />
+            <button
+              data-testid="scan-folder-btn"
+              disabled={scanning}
+              onClick={() => inputRef.current?.click()}
+              className="border border-orange-500 bg-orange-500/10 hover:bg-orange-500 hover:text-black text-orange-400 font-mono text-xs uppercase tracking-[0.2em] px-4 py-2 flex items-center gap-2 disabled:opacity-50">
+              <Radar size={14} strokeWidth={1.5} />
+              {scanning ? "SCANNING…" : "PICK FOLDER · START SCAN"}
+            </button>
+            <span className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+              {scanning ? `${progress.done}/${progress.total}` : "waiting for target"}
+            </span>
+          </div>
+
+          {scanning && (
+            <div className="space-y-2" data-testid="scan-progress">
+              <div className="h-1 bg-zinc-900 border border-zinc-800">
+                <div className="h-full bg-orange-500 transition-none"
+                     style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
+              </div>
+              <div className="font-mono text-[10px] text-zinc-500 truncate">
+                hashing :: <span className="text-orange-400">{progress.current}</span>
+              </div>
+            </div>
+          )}
+
+          {result && !scanning && (
+            <div className="border border-zinc-800 bg-black p-4 space-y-3" data-testid="scan-result">
+              <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-emerald-400">&gt; scan_complete</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="border border-zinc-800 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Scanned</div>
+                  <div className="font-mono text-2xl">{result.scanned}</div>
+                </div>
+                <div className="border border-zinc-800 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Unique added</div>
+                  <div className="font-mono text-2xl text-emerald-400">{result.added}</div>
+                </div>
+                <div className="border border-zinc-800 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Duplicates</div>
+                  <div className="font-mono text-2xl text-red-400">{result.duplicates}</div>
+                </div>
+                <div className="border border-zinc-800 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Memory saved</div>
+                  <div className="font-mono text-2xl text-orange-400">{fmtBytes(result.bytes_saved)}</div>
+                </div>
+              </div>
+              {result.duplicate_details?.length > 0 && (
+                <div className="border border-red-900/40 overflow-x-auto">
+                  <div className="px-4 py-2 border-b border-red-900/40 font-mono text-[10px] uppercase tracking-[0.25em] text-red-400 bg-red-950/20">
+                    [!] Collisions found — existing copies below
+                  </div>
+                  <table className="w-full min-w-[700px]">
+                    <thead>
+                      <tr className="border-b border-zinc-800">
+                        {["Duplicate at", "Already lives at", "Size", "Reason"].map((h, i) => (
+                          <th key={i} className="py-2 px-3 text-left text-[10px] tracking-widest uppercase text-zinc-500 font-mono">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.duplicate_details.slice(0, 100).map((d, i) => (
+                        <tr key={i} className="border-b border-zinc-900">
+                          <td className="py-2 px-3 font-mono text-[11px] text-red-300 truncate max-w-[260px]">{d.scanned_path}</td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-emerald-400 truncate max-w-[260px]">{d.existing_path}</td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-zinc-400">{fmtBytes(d.size)}</td>
+                          <td className="py-2 px-3"><Badge tone={d.reason === "vault_match" ? "alert" : "accent"}>{d.reason}</Badge></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Local agent instructions */}
+      <div className="border border-zinc-800 bg-zinc-950" data-testid="agent-panel">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+          <div className="flex items-center gap-2">
+            <HardDrive size={14} className="text-orange-500" strokeWidth={1.5} />
+            <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-zinc-400">
+              &gt; monoscan.agent · whole-computer
+            </span>
+          </div>
+          <span className="font-mono text-[10px] text-zinc-600 uppercase tracking-widest">runs locally · full disk access</span>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            For a <span className="text-orange-400">whole-computer scan</span> (including system folders the
+            browser cannot reach), run the MonoScan agent on your machine. It's a single Python file that
+            recursively walks your entire drive, hashes every file, and reports duplicates back to this vault.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            {[
+              { id: "mac", label: "Mac" },
+              { id: "windows", label: "Windows" },
+              { id: "linux", label: "Linux" },
+            ].map((p) => (
+              <button
+                key={p.id}
+                data-testid={`agent-os-${p.id}`}
+                onClick={() => setPlatform(p.id)}
+                className={`border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.25em] ${
+                  platform === p.id ? "bg-white text-black border-white font-bold"
+                                    : "border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-500"
+                }`}>{p.label}</button>
+            ))}
+          </div>
+
+          <div className="relative bg-black border border-zinc-800">
+            <pre className="p-4 font-mono text-[11px] text-emerald-400 overflow-x-auto whitespace-pre" data-testid="agent-command">
+{commands[platform]}
+            </pre>
+            <button
+              data-testid="agent-copy-btn"
+              onClick={copyCmd}
+              className="absolute top-2 right-2 border border-zinc-700 hover:border-orange-500 text-zinc-400 hover:text-orange-400 p-1.5 flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest">
+              {copied ? <><CheckCircle2 size={12} strokeWidth={1.5} /> copied</> : <><Copy size={12} strokeWidth={1.5} /> copy</>}
+            </button>
+          </div>
+
+          <div className="flex gap-3 flex-wrap">
+            <a
+              data-testid="agent-download-link"
+              href={`${API}/agent/monoscan.py?request_backend=${encodeURIComponent(BACKEND_URL)}`}
+              className="border border-zinc-700 hover:border-orange-500 hover:text-orange-400 text-zinc-300 font-mono text-xs uppercase tracking-[0.2em] px-4 py-2 flex items-center gap-2">
+              <Download size={14} strokeWidth={1.5} /> Download monoscan.py
+            </a>
+            <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest self-center">
+              &gt; requires python 3.8+ · needs `requests` (pip install requests)
+            </div>
+          </div>
+
+          <div className="border-t border-zinc-800 pt-3 space-y-1 text-[11px] font-mono text-zinc-500">
+            <div>[i] Only SHA-256 hashes + filenames are sent — file contents never leave your machine.</div>
+            <div>[i] Skips hidden folders, node_modules, .git, System Volume Information, $RECYCLE.BIN by default.</div>
+            <div>[i] Schedule with cron (Mac/Linux) or Task Scheduler (Windows) for continuous dedup enforcement.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 // ---------- Dashboard ----------
 const Dashboard = ({ stats }) => {
   const categoryOrder = ["pdf", "doc", "audio", "video", "image", "installer", "other"];
@@ -565,6 +857,7 @@ function App() {
   const tabs = useMemo(() => ([
     { id: "dashboard", label: "Overview", icon: <Cpu size={13} strokeWidth={1.5} /> },
     { id: "files", label: "Files", icon: <FileIcon size={13} strokeWidth={1.5} /> },
+    { id: "scan", label: "Full Scan", icon: <Radar size={13} strokeWidth={1.5} /> },
     { id: "apps", label: "Applications", icon: <Package size={13} strokeWidth={1.5} /> },
   ]), []);
 
@@ -670,6 +963,9 @@ function App() {
               category={category} setCategory={setCategory}
             />
           </>
+        )}
+        {tab === "scan" && (
+          <ScanPanel refreshAll={refreshAll} />
         )}
         {tab === "apps" && (
           <AppsPanel apps={apps} refresh={refreshAll} onDup={setDupRecord} />

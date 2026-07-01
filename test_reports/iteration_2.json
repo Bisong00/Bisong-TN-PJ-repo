@@ -1,0 +1,42 @@
+{
+  "summary": "Full backend + frontend test for the whole-computer dedup scan feature (POST /api/files/scan, GET /api/agent/monoscan.py) plus Full Scan UI tab and regressions. Backend: 8/8 pytest cases passed. Frontend: all Full Scan UI elements (scan-panel, scan-folder-btn, scan-folder-input w/ webkitdirectory, agent-panel, agent-os-{mac,windows,linux} switcher, agent-command switching, agent-copy-btn no console errors, agent-download-link href with request_backend query) verified via Playwright. Regressions on dashboard/files/apps tabs also render.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/files/scan",
+        "issue": "The `batch_duplicate` branch in bulk_scan is effectively unreachable. In the loop, each unique item is inserted into MongoDB before the next item is checked, so any repeat of the same SHA within the same batch is caught by the earlier `db.files.find_one({sha256:...})` check and labeled `vault_match` (not `batch_duplicate`). Functionality (deduplication + not double-adding) still works — only the `reason` label is misleading. Consider checking `seen_in_batch` before the vault query, or defer inserts until end of batch, to correctly label within-batch duplicates."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_scan_and_agent.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional/nice-to-have) Fix reason labeling in /api/files/scan so that within-batch duplicates are reported as `batch_duplicate` instead of `vault_match` (requires reordering the vault check vs seen_in_batch check, or batching inserts).",
+    "Prior iteration_1 flagged missing pointer-events-none on scanline overlays; verified from current App.js that lines 72 and 906 already include `pointer-events-none`, so the modal-close issue appears already resolved. No further action needed."
+  ],
+  "critical_code_review_comments": [
+    "server.py bulk_scan: within-batch duplicate branch (lines 236-248) is dead code because the vault find_one at line 220 catches items just inserted earlier in the same batch. Consider swapping check order.",
+    "server.py bulk_scan: sequential await for db.files.find_one + insert_one per item is fine for small batches but will be slow for whole-disk scans (potentially 100k+ items). Consider a bulk `find({sha256: {$in: [...]}})` prefetch and `insert_many` for real whole-computer scans.",
+    "server.py `duplicate_details` is truncated at [:500] but `duplicates` count and `bytes_saved` still reflect the full total — good (matches PRD).",
+    "server.py `/api/agent/monoscan.py`: file is read from disk on every request. For a static agent script this is fine; consider caching + ETag if traffic scales.",
+    "server.py CORS_ORIGINS default '*' with allow_credentials=True is a browser CORS spec violation (browsers reject `*` with credentials). Not blocking current preview but should be tightened for prod.",
+    "App.js is now ~990 lines — approaching the 700-line threshold. Consider extracting ScanPanel, AppsPanel, FilesPanel, Dropzone into separate files."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_scan_and_agent.py (new)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (14/14 UI checks)"},
+  "seed_data_creation": "Tests create and clean up TEST_-prefixed hashes/files/apps within each test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Full Scan feature works end-to-end. Backend test file at /app/backend/tests/test_scan_and_agent.py covers /api/files/scan aggregate fields, dedup within batch, dedup against vault, stats increments, /api/agent/monoscan.py with __BACKEND_URL__ replacement, plus regressions for /api/files/upload, /api/apps, /api/stats. Frontend Playwright verified tab-scan → scan-panel, folder-picker attributes (webkitdirectory), OS switcher swapping the agent command between ~, C:\\, /, and agent-download-link href. One minor semantic bug: batch_duplicate branch never triggers (labeled vault_match). Not a blocker.",
+  "rca_of_the_issue": "N/A — no critical bugs found this iteration. The prior iteration_1 pointer-events blocker is no longer reproducible; scanline overlays now include pointer-events-none in current source."
+}
