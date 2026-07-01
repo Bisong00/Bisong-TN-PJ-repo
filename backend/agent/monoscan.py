@@ -271,8 +271,8 @@ def cmd_scan(args):
 
 
 def cmd_watch(args):
-    """Poll the root directory periodically and hash any new files.
-    No external deps — just re-walks and skips already-seen paths."""
+    """Poll the root directory periodically and hash any new OR modified files.
+    Tracks (path -> (mtime, size)); if either changes, the file is re-hashed."""
     root = Path(os.path.expanduser(args.root)).resolve()
     if not root.exists():
         print(f"[!] Path does not exist: {root}", file=sys.stderr)
@@ -285,34 +285,56 @@ def cmd_watch(args):
     print()
 
     max_bytes = args.max_size_mb * 1024 * 1024
-    known: set = set()
+    # path -> (mtime, size)
+    known: dict = {}
 
-    # initial index of existing paths so we only report NEW files after this point
-    for p, _ in iter_files(root, args.include_hidden, max_bytes):
-        known.add(str(p))
-    print(f"    [i] baseline indexed :: {len(known)} files known · watching for new arrivals…")
+    # Baseline index
+    for p, size in iter_files(root, args.include_hidden, max_bytes):
+        try:
+            known[str(p)] = (p.stat().st_mtime_ns, size)
+        except OSError:
+            continue
+    print(f"    [i] baseline indexed :: {len(known)} files known · watching for changes…")
 
     try:
         while True:
             time.sleep(args.interval)
             new_batch: list = []
+            current_paths: set = set()
+
             for p, size in iter_files(root, args.include_hidden, max_bytes):
                 sp = str(p)
-                if sp in known:
+                current_paths.add(sp)
+                try:
+                    mtime_ns = p.stat().st_mtime_ns
+                except OSError:
                     continue
+
+                prev = known.get(sp)
+                if prev is not None and prev == (mtime_ns, size):
+                    continue  # unchanged
+
                 try:
                     digest = sha256_of_file(p)
                 except (OSError, PermissionError):
                     continue
+
                 mime, _ = mimetypes.guess_type(p.name)
                 new_batch.append({
                     "filename": p.name, "size": size, "sha256": digest,
                     "relative_path": sp, "mime_type": mime or "",
                 })
-                known.add(sp)
+                known[sp] = (mtime_ns, size)
+
+            # Drop deleted paths from tracking
+            removed = [k for k in known if k not in current_paths]
+            for k in removed:
+                del known[k]
+            if removed:
+                print(f"    [-] {len(removed)} file(s) removed from disk")
 
             if new_batch:
-                print(f"    [+] {len(new_batch)} new file(s) detected")
+                print(f"    [+] {len(new_batch)} new/changed file(s)")
                 try:
                     r = send_batch(args.backend, new_batch, str(root), args.dry_run)
                     print(f"        added={r.get('added',0)} duplicates={r.get('duplicates',0)} "

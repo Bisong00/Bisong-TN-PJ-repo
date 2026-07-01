@@ -250,3 +250,187 @@ def test_stats_has_by_category(session):
     for k in ("total_files", "total_apps", "duplicates_prevented", "bytes_saved",
               "total_bytes_tracked", "by_category"):
         assert k in j
+
+
+# ---------- Duplicates registry ----------
+class TestDuplicatesRegistry:
+    def _seed_batch_dup(self, session):
+        sha = _sha(f"TEST_dupreg_batch_{uuid.uuid4()}")
+        items = [
+            {"filename": "TEST_dupreg_a.txt", "size": 111, "sha256": sha,
+             "relative_path": "/tmp/TEST_dupreg_a.txt", "mime_type": "text/plain"},
+            {"filename": "TEST_dupreg_a_copy.txt", "size": 111, "sha256": sha,
+             "relative_path": "/dup/TEST_dupreg_a_copy.txt", "mime_type": "text/plain"},
+        ]
+        r = session.post(f"{API}/files/scan",
+                         json={"items": items, "root_label": "/tmp", "source": "browser"})
+        assert r.status_code == 200
+        return sha
+
+    def test_scan_persists_batch_duplicate(self, session):
+        sha = self._seed_batch_dup(session)
+        r = session.get(f"{API}/duplicates", params={"q": sha})
+        assert r.status_code == 200
+        arr = r.json()
+        assert isinstance(arr, list) and len(arr) >= 1
+        d = next(x for x in arr if x["sha256"] == sha)
+        assert d["reason"] == "batch_duplicate"
+        assert d["scanned_path"] == "/dup/TEST_dupreg_a_copy.txt"
+        assert d["existing_path"] == "/tmp/TEST_dupreg_a.txt"
+        assert d["reclaimed"] is False
+        assert "id" in d and isinstance(d["id"], str)
+
+        # cleanup
+        session.delete(f"{API}/duplicates/{d['id']}")
+        for f in session.get(f"{API}/files").json():
+            if f["sha256"] == sha:
+                session.delete(f"{API}/files/{f['id']}")
+
+    def test_upload_dup_persists_upload_duplicate(self, session):
+        content = ("TEST_uploaddup_" + uuid.uuid4().hex).encode()
+        digest = hashlib.sha256(content).hexdigest()
+        r1 = session.post(f"{API}/files/upload",
+                          files={"file": ("TEST_up.txt", io.BytesIO(content), "text/plain")})
+        assert r1.status_code == 200
+        fid = r1.json()["record"]["id"]
+        r2 = session.post(f"{API}/files/upload",
+                          files={"file": ("TEST_up_copy.txt", io.BytesIO(content), "text/plain")})
+        assert r2.status_code == 200 and r2.json()["duplicate"] is True
+
+        r = session.get(f"{API}/duplicates", params={"q": digest})
+        arr = r.json()
+        assert any(d["sha256"] == digest and d["reason"] == "upload_duplicate" for d in arr)
+        # cleanup
+        for d in arr:
+            if d["sha256"] == digest:
+                session.delete(f"{API}/duplicates/{d['id']}")
+        session.delete(f"{API}/files/{fid}")
+
+    def test_duplicates_filters_and_stats(self, session):
+        sha = self._seed_batch_dup(session)
+        # stats structure
+        s = session.get(f"{API}/duplicates/stats").json()
+        for k in ("total", "active", "reclaimed", "reclaimable_bytes"):
+            assert k in s
+        assert s["total"] >= 1 and s["active"] >= 1
+
+        # filter by reason
+        r = session.get(f"{API}/duplicates", params={"reason": "batch_duplicate"})
+        assert r.status_code == 200
+        assert all(x["reason"] == "batch_duplicate" for x in r.json())
+
+        # filter by reclaimed=false
+        r = session.get(f"{API}/duplicates", params={"reclaimed": "false"})
+        assert r.status_code == 200
+        assert all(x["reclaimed"] is False for x in r.json())
+
+        # get the seeded dup id
+        seeded = next(x for x in session.get(f"{API}/duplicates", params={"q": sha}).json()
+                      if x["sha256"] == sha)
+        dup_id = seeded["id"]
+
+        # mark reclaimed
+        mr = session.post(f"{API}/duplicates/{dup_id}/mark-reclaimed")
+        assert mr.status_code == 200 and mr.json().get("reclaimed") is True
+
+        rc = session.get(f"{API}/duplicates", params={"reclaimed": "true"})
+        assert any(x["id"] == dup_id for x in rc.json())
+
+        # delete + 404
+        assert session.delete(f"{API}/duplicates/{dup_id}").status_code == 200
+        assert session.delete(f"{API}/duplicates/nonexistent-xyz").status_code == 404
+        assert session.post(f"{API}/duplicates/nonexistent-xyz/mark-reclaimed").status_code == 404
+
+        # cleanup files
+        for f in session.get(f"{API}/files").json():
+            if f["sha256"] == sha:
+                session.delete(f"{API}/files/{f['id']}")
+
+    def test_reclaim_script_posix(self, session):
+        sha = self._seed_batch_dup(session)
+        d = next(x for x in session.get(f"{API}/duplicates", params={"q": sha}).json()
+                 if x["sha256"] == sha)
+        r = session.get(f"{API}/duplicates/{d['id']}/script", params={"platform": "posix"})
+        assert r.status_code == 200
+        assert "text/x-shellscript" in r.headers.get("content-type", "").lower()
+        assert "attachment" in r.headers.get("content-disposition", "").lower()
+        body = r.text
+        assert body.startswith("#!/usr/bin/env bash")
+        assert "set -euo pipefail" in body
+        assert "DUP='/dup/TEST_dupreg_a_copy.txt'" in body
+        assert "ORIG='/tmp/TEST_dupreg_a.txt'" in body
+        assert "ln -s" in body
+
+        # cleanup
+        session.delete(f"{API}/duplicates/{d['id']}")
+        for f in session.get(f"{API}/files").json():
+            if f["sha256"] == sha:
+                session.delete(f"{API}/files/{f['id']}")
+
+    def test_reclaim_script_windows(self, session):
+        sha = self._seed_batch_dup(session)
+        d = next(x for x in session.get(f"{API}/duplicates", params={"q": sha}).json()
+                 if x["sha256"] == sha)
+        r = session.get(f"{API}/duplicates/{d['id']}/script", params={"platform": "windows"})
+        assert r.status_code == 200
+        assert "attachment" in r.headers.get("content-disposition", "").lower()
+        body = r.text
+        assert "New-Item -ItemType SymbolicLink" in body
+        assert "$dup" in body and "$orig" in body
+
+        # cleanup
+        session.delete(f"{API}/duplicates/{d['id']}")
+        for f in session.get(f"{API}/files").json():
+            if f["sha256"] == sha:
+                session.delete(f"{API}/files/{f['id']}")
+
+    def test_script_404_on_missing(self, session):
+        r = session.get(f"{API}/duplicates/nonexistent-xyz/script", params={"platform": "posix"})
+        assert r.status_code == 404
+
+
+# ---------- CORS ----------
+class TestCORS:
+    def test_preflight_no_credentials_when_wildcard(self, session):
+        # OPTIONS preflight
+        r = session.options(f"{API}/files", headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "content-type",
+        })
+        # Starlette returns 200 for preflight
+        assert r.status_code in (200, 204)
+        # With CORS_ORIGINS='*', middleware should NOT set allow-credentials: true
+        acac = r.headers.get("access-control-allow-credentials", "").lower()
+        assert acac != "true", (
+            f"allow-credentials must NOT be true when origins is '*' (spec violation). "
+            f"Headers: {dict(r.headers)}")
+
+
+# ---------- Agent script mtime tracking ----------
+class TestAgentWatchMtime:
+    def test_watch_tracks_mtime(self, session):
+        r = session.get(f"{API}/agent/monoscan.py")
+        assert r.status_code == 200
+        body = r.text
+        # accept either 'mtime_ns' or 'st_mtime_ns'
+        assert ("st_mtime_ns" in body) or ("mtime_ns" in body), (
+            "cmd_watch must track (mtime_ns, size) — neither token found in served script")
+
+
+# ---------- Streaming exports ----------
+class TestStreamingExports:
+    def test_files_export_json_streams_array(self, session):
+        r = session.get(f"{API}/files/export", params={"format": "json"}, stream=True)
+        assert r.status_code == 200
+        assert "application/json" in r.headers.get("content-type", "").lower()
+        assert "attachment" in r.headers.get("content-disposition", "").lower()
+        data = json.loads(r.content)
+        assert isinstance(data, list)
+
+    def test_files_export_csv_streams(self, session):
+        r = session.get(f"{API}/files/export", params={"format": "csv"}, stream=True)
+        assert r.status_code == 200
+        assert "text/csv" in r.headers.get("content-type", "").lower()
+        assert "attachment" in r.headers.get("content-disposition", "").lower()
+

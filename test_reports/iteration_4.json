@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 4 verified end-to-end: (1) NEW /api/duplicates registry persists batch_duplicate on /api/files/scan and upload_duplicate on /api/files/upload; GET supports q/reason/reclaimed filters; /stats returns {total,active,reclaimed,reclaimable_bytes}; mark-reclaimed flips flag; DELETE removes + 404 on missing; (2) Reclaim scripts — /duplicates/{id}/script?platform=posix returns text/x-shellscript with '#!/usr/bin/env bash', 'set -euo pipefail', DUP=... ORIG=... and 'ln -s'; ?platform=windows returns PowerShell with $dup/$orig and 'New-Item -ItemType SymbolicLink'; (3) Streaming exports — /api/files/export?format=csv|json now StreamingResponse with correct content-type & attachment header; JSON body parses to a list; CSV escapes tricky commas/quotes and round-trips through csv.DictReader; (4) CORS — with default CORS_ORIGINS='*' preflight OPTIONS returns 'access-control-allow-origin: *' and does NOT set 'access-control-allow-credentials: true' (spec-compliant); (5) Served /api/agent/monoscan.py cmd_watch now tracks (mtime_ns,size) — 'st_mtime_ns' present; (6) Frontend refactor sanity — App.js is now orchestration only (170 lines); all 5 tabs (dashboard/files/scan/duplicates/apps) render without console errors; NEW Duplicates panel shows table + 4 stat cards; reclaim-posix-<id> and reclaim-windows-<id> hrefs point at /api/duplicates/<id>/script; reason chip filter + status chip filter change list; mark-reclaimed-<id> flips row into reclaimed state; dismiss-duplicate-<id> removes row; upload same file twice → duplicate=true and a persistent duplicate record is created. Regression: Files export buttons (CSV/JSON), Apps export buttons (CSV/JSON), Scan panel testids, upload dedup all still working. 23/23 pytest passed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_scan_and_agent.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py: record_duplicate() mutates the dict in-place (motor's insert_one adds _id to the inserted dict). Current code compensates via `dup.pop('_id', None)` after copying — correct, but slightly non-obvious. Consider `await db.duplicates.insert_one({**dup})` and just returning `dup` for clarity.",
+    "server.py: /api/duplicates?limit=500 hard cap is fine for MVP, but no pagination for very large historical registries. Consider `skip`/`limit` params later.",
+    "server.py: _reclaim_script_posix always writes `#!/usr/bin/env bash` and uses POSIX single-quote quoting — correct. `_reclaim_script_windows` uses backtick-quote (`\"`) escaping which is correct for PowerShell double-quoted strings.",
+    "server.py: /api/duplicates and /api/duplicates/stats path ordering — FastAPI resolves `/duplicates/stats` before `/duplicates/{dup_id}`? Actually `/stats` is a static path but there is NO `/duplicates/{dup_id}` GET, only DELETE/POST/GET-script. Confirmed no route-collision issue.",
+    "monoscan.py cmd_watch: switched to (mtime_ns, size) tuple keyed by path — good; detects re-created files at same path.",
+    "CORS: allow_credentials now correctly False when '*' is in origins — Starlette will silently drop credential-mode requests but respond to non-credentialed calls. Good hardening.",
+    "Frontend App.js: down to 170 lines, cleanly delegates to Dashboard/FilesPanel/ScanPanel/DuplicatesPanel/AppsPanel/Dropzone/DuplicateModal — solid refactor.",
+    "DuplicatesPanel.jsx: default statusFilter='active' means brand-new duplicates show without extra clicks — good UX. Uses Promise.all for parallel /duplicates + /duplicates/stats — good.",
+    "server.py: stats.duplicates_prevented is a lifetime counter that never resets even after DELETE of underlying files/apps. Intentional per problem statement (historical), but worth documenting in API/UI tooltip."
+  ],
+  "updated_files": ["/app/backend/tests/test_scan_and_agent.py"],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% (all critical Duplicates flows + regression tabs verified)"},
+  "test_credentials": "none required",
+  "seed_data_creation": "All test data prefixed with TEST_ (pytest) and UI_ (playwright); every test cleans up its own files + duplicate registry records via DELETE calls. After the frontend script an additional cleanup pass removed any leftover TEST_/UI_ files & duplicates.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 4 covers the full duplicate-registry lifecycle plus reclaim scripts, streaming exports, CORS relaxation, and monoscan mtime tracking. Backend suite is at /app/backend/tests/test_scan_and_agent.py — 23 tests, all green. It requires REACT_APP_BACKEND_URL in the env (pytest.ini does not export frontend/.env; you can either source it or pass REACT_APP_BACKEND_URL=... inline as done). Frontend Duplicates panel testids: tab-duplicates, duplicates-table, dup-stats-{total,active,reclaimed,bytes}, dup-reason-chip-{all,vault_match,batch_duplicate,upload_duplicate}, dup-status-chip-{active,reclaimed,all}, reclaim-posix-<id>, reclaim-windows-<id>, mark-reclaimed-<id>, dismiss-duplicate-<id>, duplicates-search-input, duplicates-refresh. Note: the ingress blocks non-browser user-agents (default python-urllib gets 403); for playwright, do all API prep via page.evaluate(fetch(...)) — worked perfectly.",
+  "rca_of_the_issue": "N/A — iteration passed all functional and integration checks; no defects found."
+}

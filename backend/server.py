@@ -1,10 +1,11 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import hashlib
+import json
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -148,6 +149,28 @@ async def inc_counter(bytes_saved: int) -> None:
     )
 
 
+async def record_duplicate(*, sha256: str, filename: str, size: int,
+                           scanned_path: str, existing_path: str,
+                           reason: str, source: str, vault_id: Optional[str] = None) -> dict:
+    """Persist every detected duplicate occurrence so it can be reclaimed later."""
+    dup = {
+        "id": str(uuid.uuid4()),
+        "sha256": sha256,
+        "filename": filename,
+        "size": int(size or 0),
+        "scanned_path": scanned_path,
+        "existing_path": existing_path,
+        "vault_id": vault_id,
+        "reason": reason,          # vault_match | batch_duplicate | upload_duplicate
+        "source": source,          # upload | browser | agent
+        "reclaimed": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.duplicates.insert_one(dup.copy())
+    dup.pop("_id", None)
+    return dup
+
+
 # ---------- File endpoints ----------
 
 @api_router.post("/files/upload")
@@ -171,6 +194,13 @@ async def upload_file(
     existing = await db.files.find_one({"sha256": digest}, {"_id": 0})
     if existing:
         await inc_counter(existing.get("size", total))
+        await record_duplicate(
+            sha256=digest, filename=file.filename or "unnamed",
+            size=total, scanned_path=original_path or (file.filename or ""),
+            existing_path=existing.get("original_path") or existing.get("filename", ""),
+            reason="upload_duplicate", source="upload",
+            vault_id=existing.get("id"),
+        )
         return {"duplicate": True, "record": existing}
 
     record = FileRecord(
@@ -229,6 +259,7 @@ async def bulk_scan(payload: ScanRequest):
     duplicate_details: List[dict] = []
     seen_in_batch: dict = {}
     to_insert: List[dict] = []
+    dup_records_to_insert: List[dict] = []
 
     for it in items:
         size = int(it.size or 0)
@@ -247,6 +278,14 @@ async def bulk_scan(payload: ScanRequest):
                 "sha256": sha,
                 "reason": "batch_duplicate",
             })
+            dup_records_to_insert.append({
+                "id": str(uuid.uuid4()), "sha256": sha, "filename": it.filename,
+                "size": size, "scanned_path": it.relative_path,
+                "existing_path": seen_in_batch[sha], "vault_id": None,
+                "reason": "batch_duplicate", "source": payload.source or "scan",
+                "reclaimed": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
             continue
 
         # 2) Already in vault?
@@ -254,13 +293,22 @@ async def bulk_scan(payload: ScanRequest):
         if existing:
             duplicates += 1
             bytes_saved += size
+            existing_p = existing.get("original_path") or existing.get("filename")
             duplicate_details.append({
                 "scanned_path": it.relative_path,
-                "existing_path": existing.get("original_path") or existing.get("filename"),
+                "existing_path": existing_p,
                 "filename": it.filename,
                 "size": size,
                 "sha256": sha,
                 "reason": "vault_match",
+            })
+            dup_records_to_insert.append({
+                "id": str(uuid.uuid4()), "sha256": sha, "filename": it.filename,
+                "size": size, "scanned_path": it.relative_path,
+                "existing_path": existing_p, "vault_id": existing.get("id"),
+                "reason": "vault_match", "source": payload.source or "scan",
+                "reclaimed": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
             })
             continue
 
@@ -279,6 +327,9 @@ async def bulk_scan(payload: ScanRequest):
 
     if to_insert:
         await db.files.insert_many(to_insert, ordered=False)
+
+    if dup_records_to_insert:
+        await db.duplicates.insert_many(dup_records_to_insert, ordered=False)
 
     if duplicates:
         await db.dedup_counter.update_one(
@@ -333,21 +384,41 @@ def _csv_line(vals: List[str]) -> str:
     return ",".join(out) + "\n"
 
 
+async def _stream_collection_csv(collection, headers: List[str]):
+    """Async generator: yields CSV header + one line per doc from a Motor cursor."""
+    yield _csv_line(headers)
+    cursor = collection.find({}, {"_id": 0}).sort("created_at", -1)
+    async for r in cursor:
+        yield _csv_line([r.get(h, "") for h in headers])
+
+
+async def _stream_collection_json(collection):
+    """Async generator: yields a valid JSON array streamed doc-by-doc."""
+    cursor = collection.find({}, {"_id": 0}).sort("created_at", -1)
+    yield "[\n"
+    first = True
+    async for r in cursor:
+        prefix = "" if first else ",\n"
+        first = False
+        yield prefix + json.dumps(r, default=str)
+    yield "\n]\n"
+
+
+FILE_EXPORT_HEADERS = ["id", "filename", "size", "mime_type", "sha256",
+                       "file_category", "original_path", "created_at"]
+APP_EXPORT_HEADERS = ["id", "app_name", "version", "platform", "install_path", "notes", "created_at"]
+
+
 @api_router.get("/files/export")
 async def export_files(format: str = "json"):
-    rows = await db.files.find({}, {"_id": 0}).sort("created_at", -1).to_list(100000)
     if format.lower() == "csv":
-        headers = ["id", "filename", "size", "mime_type", "sha256",
-                   "file_category", "original_path", "created_at"]
-        body = _csv_line(headers)
-        for r in rows:
-            body += _csv_line([r.get(h, "") for h in headers])
-        return PlainTextResponse(
-            body, media_type="text/csv",
+        return StreamingResponse(
+            _stream_collection_csv(db.files, FILE_EXPORT_HEADERS),
+            media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=mononode_files.csv"},
         )
-    return PlainTextResponse(
-        __import__("json").dumps(rows, indent=2),
+    return StreamingResponse(
+        _stream_collection_json(db.files),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=mononode_files.json"},
     )
@@ -355,18 +426,14 @@ async def export_files(format: str = "json"):
 
 @api_router.get("/apps/export")
 async def export_apps(format: str = "json"):
-    rows = await db.apps.find({}, {"_id": 0}).sort("created_at", -1).to_list(100000)
     if format.lower() == "csv":
-        headers = ["id", "app_name", "version", "platform", "install_path", "notes", "created_at"]
-        body = _csv_line(headers)
-        for r in rows:
-            body += _csv_line([r.get(h, "") for h in headers])
-        return PlainTextResponse(
-            body, media_type="text/csv",
+        return StreamingResponse(
+            _stream_collection_csv(db.apps, APP_EXPORT_HEADERS),
+            media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=mononode_apps.csv"},
         )
-    return PlainTextResponse(
-        __import__("json").dumps(rows, indent=2),
+    return StreamingResponse(
+        _stream_collection_json(db.apps),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=mononode_apps.json"},
     )
@@ -414,6 +481,127 @@ async def delete_app(app_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="App not found")
     return {"deleted": True}
+
+
+# ---------- Duplicates registry ----------
+
+def _shell_quote_posix(p: str) -> str:
+    return "'" + p.replace("'", "'\"'\"'") + "'"
+
+
+def _reclaim_script_posix(dup: dict) -> str:
+    dup_path = _shell_quote_posix(dup["scanned_path"])
+    orig_path = _shell_quote_posix(dup["existing_path"])
+    return (
+        "#!/usr/bin/env bash\n"
+        "# MonoNode reclaim script — replaces a duplicate file with a symlink to the canonical copy.\n"
+        f"# duplicate  : {dup['scanned_path']}\n"
+        f"# canonical  : {dup['existing_path']}\n"
+        f"# sha-256    : {dup['sha256']}\n"
+        f"# size       : {dup['size']} bytes\n"
+        "set -euo pipefail\n"
+        f"DUP={dup_path}\n"
+        f"ORIG={orig_path}\n"
+        "if [ ! -f \"$DUP\" ]; then echo \"[!] duplicate no longer exists: $DUP\"; exit 0; fi\n"
+        "if [ ! -f \"$ORIG\" ]; then echo \"[!] canonical missing, aborting: $ORIG\"; exit 1; fi\n"
+        "# Optional: safety backup to /tmp before deleting\n"
+        "cp -p \"$DUP\" \"/tmp/$(basename \"$DUP\").mononode.bak\" 2>/dev/null || true\n"
+        "rm \"$DUP\"\n"
+        "ln -s \"$ORIG\" \"$DUP\"\n"
+        f"echo \"[✓] reclaimed: $DUP -> $ORIG\"\n"
+    )
+
+
+def _reclaim_script_windows(dup: dict) -> str:
+    # PowerShell — mklink requires admin OR Developer Mode
+    dup_p = dup["scanned_path"].replace("\"", "`\"")
+    orig_p = dup["existing_path"].replace("\"", "`\"")
+    return (
+        "# MonoNode reclaim script (PowerShell)\r\n"
+        f"# duplicate  : {dup['scanned_path']}\r\n"
+        f"# canonical  : {dup['existing_path']}\r\n"
+        f"# sha-256    : {dup['sha256']}\r\n"
+        "$ErrorActionPreference = 'Stop'\r\n"
+        f"$dup = \"{dup_p}\"\r\n"
+        f"$orig = \"{orig_p}\"\r\n"
+        "if (-not (Test-Path -LiteralPath $dup)) { Write-Host \"[!] duplicate no longer exists: $dup\"; exit 0 }\r\n"
+        "if (-not (Test-Path -LiteralPath $orig)) { Write-Host \"[!] canonical missing: $orig\"; exit 1 }\r\n"
+        "Copy-Item -LiteralPath $dup -Destination (Join-Path $env:TEMP ((Split-Path $dup -Leaf) + '.mononode.bak')) -ErrorAction SilentlyContinue\r\n"
+        "Remove-Item -LiteralPath $dup -Force\r\n"
+        "New-Item -ItemType SymbolicLink -Path $dup -Target $orig | Out-Null\r\n"
+        "Write-Host \"[+] reclaimed: $dup -> $orig\"\r\n"
+    )
+
+
+@api_router.get("/duplicates")
+async def list_duplicates(q: Optional[str] = None, reason: Optional[str] = None,
+                          reclaimed: Optional[bool] = None, limit: int = 500):
+    query: dict = {}
+    if reason and reason != "all":
+        query["reason"] = reason
+    if reclaimed is not None:
+        query["reclaimed"] = reclaimed
+    if q:
+        query["$or"] = [
+            {"filename": {"$regex": q, "$options": "i"}},
+            {"scanned_path": {"$regex": q, "$options": "i"}},
+            {"existing_path": {"$regex": q, "$options": "i"}},
+            {"sha256": {"$regex": q, "$options": "i"}},
+        ]
+    items = await db.duplicates.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return items
+
+
+@api_router.get("/duplicates/stats")
+async def duplicates_stats():
+    total = await db.duplicates.count_documents({})
+    active = await db.duplicates.count_documents({"reclaimed": False})
+    reclaimed = await db.duplicates.count_documents({"reclaimed": True})
+    agg = await db.duplicates.aggregate([
+        {"$match": {"reclaimed": False}},
+        {"$group": {"_id": None, "bytes": {"$sum": "$size"}}}
+    ]).to_list(1)
+    reclaimable_bytes = agg[0]["bytes"] if agg else 0
+    return {"total": total, "active": active, "reclaimed": reclaimed,
+            "reclaimable_bytes": reclaimable_bytes}
+
+
+@api_router.delete("/duplicates/{dup_id}")
+async def delete_duplicate(dup_id: str):
+    r = await db.duplicates.delete_one({"id": dup_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Duplicate not found")
+    return {"deleted": True}
+
+
+@api_router.post("/duplicates/{dup_id}/mark-reclaimed")
+async def mark_reclaimed(dup_id: str):
+    r = await db.duplicates.update_one({"id": dup_id}, {"$set": {"reclaimed": True}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Duplicate not found")
+    return {"reclaimed": True}
+
+
+@api_router.get("/duplicates/{dup_id}/script")
+async def reclaim_script(dup_id: str, platform: str = "posix"):
+    """Generate a per-OS shell script that replaces this duplicate with a symlink."""
+    dup = await db.duplicates.find_one({"id": dup_id}, {"_id": 0})
+    if not dup:
+        raise HTTPException(status_code=404, detail="Duplicate not found")
+    plat = (platform or "posix").lower()
+    if plat in ("windows", "win", "powershell", "ps1"):
+        body = _reclaim_script_windows(dup)
+        ext = "ps1"
+        mt = "text/plain"
+    else:
+        body = _reclaim_script_posix(dup)
+        ext = "sh"
+        mt = "text/x-shellscript"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in dup["filename"])[:40] or "reclaim"
+    return PlainTextResponse(
+        body, media_type=mt,
+        headers={"Content-Disposition": f"attachment; filename=reclaim_{safe}.{ext}"},
+    )
 
 
 # ---------- Stats ----------
@@ -468,10 +656,14 @@ async def agent_script(request_backend: Optional[str] = None):
 
 app.include_router(api_router)
 
+# CORS — spec-compliant. If CORS_ORIGINS is '*' we cannot set allow_credentials=True.
+_cors_raw = os.environ.get('CORS_ORIGINS', '*').strip()
+_cors_origins = [o.strip() for o in _cors_raw.split(',') if o.strip()]
+_cors_allow_credentials = not ('*' in _cors_origins)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=_cors_allow_credentials,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
