@@ -1,0 +1,99 @@
+{
+  "app_name": "MonoNode",
+  "theme_archetype": "Archetype 4 (Swiss & High-Contrast) + Terminal/Control Room Aesthetics",
+  "visual_vibe": "Technical, Data Vault, Industrial, Precise. Flat surfaces, exposed grids, sharp corners.",
+  "typography": {
+    "primary_font": "IBM Plex Sans",
+    "mono_font": "IBM Plex Mono",
+    "forbidden_fonts": ["Inter", "Roboto", "Open Sans", "Space Grotesk"],
+    "headings": "text-2xl to text-4xl, font-bold, tracking-tight, uppercase for section headers.",
+    "data_display": "font-mono, text-sm or text-xs, tracking-tight for hashes, sizes, and paths."
+  },
+  "colors": {
+    "background": {
+      "base": "#050505",
+      "surface": "#0F0F0F",
+      "surface_hover": "#1A1A1A"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "accent": "#FF6B00"
+    },
+    "borders": {
+      "default": "#27272A",
+      "focus": "#FF6B00",
+      "alert": "#EF4444"
+    },
+    "status": {
+      "duplicate": "#EF4444",
+      "unique": "#10B981",
+      "system": "#FF6B00"
+    },
+    "rules": [
+      "No purple or teal.",
+      "No dark text on dark backgrounds anywhere. Minimum APCA contrast must be met.",
+      "Use border-white/10 or border-zinc-800 for grid lines."
+    ]
+  },
+  "layout_and_spacing": {
+    "strategy": "The Control Room Grid",
+    "spacing_scale": "Dense and compact for data, generous for main layout sections (p-6 to p-12).",
+    "borders": "Expose the skeleton. Use border-collapse patterns. 1px solid borders on cards and sections. 0 border-radius (rounded-none for sharp edges).",
+    "background_texture": "Use a subtle CSS grid background for the empty space: bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"
+  },
+  "components": {
+    "upload_zone": {
+      "style": "Brutalist dashed border (border-2 border-dashed border-zinc-700), bg-zinc-950. Hover: border-orange-500 bg-orange-500/5.",
+      "typography": "Large mono text: 'INITIALIZE INGESTION' or 'DROP FILES'. Real-time SHA-256 calculation simulated with mono loading states."
+    },
+    "duplicate_alert_modal": {
+      "style": "Terminal warning style. Thick red top border (border-t-4 border-red-500). Black background. Sharp edges.",
+      "content": "Red mono heading '[!] COLLISION DETECTED'. Display existing file path in a well-contrasted mono block (bg-red-950/30 text-red-400 p-4 border border-red-900/50)."
+    },
+    "data_tables": {
+      "style": "Cardless, full-width. border-b border-zinc-800 on rows. Compact padding (py-2 px-4).",
+      "typography": "Headers in uppercase IBM Plex Sans text-xs text-zinc-500. Hashes in IBM Plex Mono text-zinc-400 text-xs truncate. Badges for file types: flat, 1px border, text-xs mono."
+    },
+    "stat_cards": {
+      "style": "Square/Rectangular bento blocks. 1px border border-zinc-800. bg-zinc-950.",
+      "content": "Value: text-4xl font-mono font-medium. Label: text-xs tracking-[0.2em] uppercase text-zinc-500. No icons needed, pure typographic data focus."
+    },
+    "filter_chips": {
+      "style": "Sharp rectangular buttons. border border-zinc-800 text-zinc-400 bg-transparent. Active state: bg-white text-black font-bold."
+    },
+    "global_search": {
+      "style": "Full width or prominent top bar. Sharp input, border-b-2 border-zinc-800 focus:border-orange-500. No rounded corners. Monospace placeholder."
+    }
+  },
+  "motion": {
+    "hover": "Instant background color shifts, no slow transitions. High technical responsiveness.",
+    "modals": "Harsh snap-in, no soft scaling. Opacity 0 to 100 instantly, mimicking a terminal popup."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Ensure strokeWidth is 1.5 or 1 for technical precision. Use sparingly. Rely on typographic symbols like [ ] or > where possible."
+  },
+  "testing": {
+    "requirements": "All interactive elements MUST have data-testid attributes.",
+    "examples": [
+      "data-testid='upload-dropzone'",
+      "data-testid='duplicate-alert-modal'",
+      "data-testid='file-registry-table'",
+      "data-testid='apps-registry-table'",
+      "data-testid='filter-chip-pdf'",
+      "data-testid='delete-file-button'",
+      "data-testid='global-search-input'",
+      "data-testid='stats-total-files'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Implement using pure .js and standard React. Do not use TypeScript.",
+    "Install and use 'lucide-react' for icons.",
+    "Use Tailwind CSS for all styling. Import IBM Plex Sans and IBM Plex Mono fonts via Google Fonts in index.css.",
+    "Customize Shadcn UI to remove all border-radius (use rounded-none) and soft shadows. Replace with sharp 1px borders.",
+    "Ensure the SHA-256 generation in the drop zone is visually indicated (mock the calculation state with flickering mono text).",
+    "Do not leave any placeholder text or generic lorem ipsum.",
+    "Read this JSON carefully and map all elements to the requested 'Data Vault / Control Room' aesthetic."
+  ]
+}
