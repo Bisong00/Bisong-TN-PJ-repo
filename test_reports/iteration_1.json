@@ -1,0 +1,49 @@
+{
+  "summary": "First-finish testing of MonoNode Memory Vault. Backend fully functional (all 15 checks passed). Frontend UI, tabs, stats, upload, duplicate detection, apps register, search, chip filters all work. One HIGH-priority UX blocker found: scanline overlay div in DuplicateModal (App.js line 71) is missing 'pointer-events-none' class, so it intercepts pointer events over the close/ack buttons — real users cannot close the duplicate-alert modal by clicking (Playwright confirmed 'scanline intercepts pointer events'). Same missing class on line 613 (Overview tab scanline). Related knock-on: delete-app click did not decrement rows in test run, likely blocked by same overlay or by the still-open modal.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "GET /api/ returns {service:'MonoNode Dedup API', status:'online'}",
+    "GET /api/stats returns zeros on empty DB",
+    "POST /api/files/upload returns duplicate:false with full record; SHA-256 matches Python hashlib for same bytes",
+    "POST /api/files/upload with identical bytes but different filename returns duplicate:true and same existing record",
+    "duplicates_prevented and bytes_saved increment correctly on duplicate upload",
+    "original_path is persisted in the record",
+    "file_category classification: .pdf->pdf, .png->image, .apk->installer, .txt->doc",
+    "GET /api/files?q=<partial> and ?category=pdf filter correctly",
+    "DELETE /api/files/{id}: 200 on real id; 404 on nonexistent",
+    "POST /api/apps creates record; case-insensitive same-name + same-version returns duplicate:true",
+    "POST /api/apps with same name + different version creates new record (2 rows)",
+    "GET /api/apps supports ?q= and ?platform= filters",
+    "DELETE /api/apps/{id}: 200 on real id; 404 on nonexistent",
+    "/api/stats.by_category reflects uploads (pdf, image, installer, doc counts + bytes)",
+    "Frontend: MEMORY VAULT header + ONE FILE / ONE INSTALL / ZERO DUPLICATES hero + all 3 tabs render",
+    "Frontend: Overview stats cards (stats-total-files, stats-total-apps, stats-duplicates, stats-bytes-saved) render live values",
+    "Frontend: Files tab has upload-dropzone, origin-path-input, global-search-input, filter-chip-pdf, file-registry-table",
+    "Frontend: Uploading via upload-input inserts a new row into file-registry-table and increments stats",
+    "Frontend: Re-uploading same file opens duplicate-alert-modal with correct dup-filename + dup-path",
+    "Frontend: Applications tab app-register-form submits and adds row to apps-registry-table",
+    "Frontend: Re-submitting same app+version opens duplicate-alert-modal showing app_name",
+    "Frontend: platform-chip-linux filters apps table; global-search-input filters files table"
+  ],
+  "failed": [
+    {
+      "area": "frontend/DuplicateModal",
+      "issue": "Scanline overlay div (App.js line 71: '<div className=\"scanline absolute inset-0\" />') is missing 'pointer-events-none' and intercepts clicks on close-duplicate-modal and ack-duplicate buttons. Line 164 has the correct 'pointer-events-none' — line 71 (modal) and line 613 (Overview) do not. Users cannot close the duplicate modal by normal click.",
+      "evidence": "Playwright: '<div class=\"scanline absolute inset-0\"> intercepts pointer events' when clicking [data-testid=close-duplicate-modal] / [data-testid=ack-duplicate]. Modal remained visible even after force click on ack in apps flow.",
+      "priority": "HIGH"
+    },
+    {
+      "area": "frontend/apps-delete",
+      "issue": "Delete-app click did not remove the row from apps-registry-table (before=2, after=2). Likely a side-effect of the still-open duplicate modal (from previous step) intercepting clicks, or the confirm dialog not firing. Not reproduced in a clean state — needs revisit after scanline fix.",
+      "evidence": "Playwright: rows before/after delete both 2 in a session where the modal had just been shown.",
+      "priority": "MEDIUM"
+    }
+  ],
+  "action_items": [
+    "Add 'pointer-events-none' class to the scanline divs at App.js line 71 (inside DuplicateModal) and line 613 (Overview) so they match line 164. This unblocks close-duplicate-modal / ack-duplicate clicks.",
+    "After fix, re-verify: (a) closing duplicate modal via close-duplicate-modal and ack-duplicate; (b) delete-app-{id} actually removes rows (window.confirm accept path)."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "~90% (1 HIGH blocker on modal close)"},
+  "retest_needed": true,
+  "full_testing_deferred": true
+}
